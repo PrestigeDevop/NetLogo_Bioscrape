@@ -19,7 +19,9 @@ https://github.com/user-attachments/assets/79c18d68-5479-485d-be40-a966c0c0138b
 
 
 ---
-#WIP 
+
+#WIP  ; NFBLB and IFFLP motifs classes ; 
+
 <img width="1196" height="517" alt="image" src="https://github.com/user-attachments/assets/d4506255-bce5-43f3-b0c5-4847291bebd8" />
 
 
