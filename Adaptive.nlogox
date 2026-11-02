@@ -1,490 +1,227 @@
 <?xml version="1.0" encoding="utf-8"?>
 <model version="NetLogo 7.0.4" snapToGrid="true">
   <code><![CDATA[extensions [py]
-
 breed [motif-nodes motif-node]
 breed [cell-markers cell-marker]
-
 directed-link-breed [regulations regulation]
-
-motif-nodes-own [
-  node-name
-  activity
-]
+motif-nodes-own [node-name activity]
 
 globals [
-  ready?
-  active-mode
-
-  python-path
-  backend-file
-
-  simulation-time
-  current-input
-
-  activity-A
-  activity-B
-  activity-C
-
-  baseline-C
-  baseline-settled?
-
-  recovery-error
-  peak-response
-  sensitivity-score
-  precision-score
-  recovery-time
-  run-status
-  event-finished?
-
-  sweep-results
-  sweep-pass-percent
+  ready? busy? active-mode python-path backend-file live-parameters
+  hidden-constants constants-mode
+  simulation-time current-input activity-A activity-B activity-C
+  baseline-C baseline-settled? settled-now? event-valid?
+  recovery-error peak-response sensitivity-score precision-score recovery-time
+  run-status event-finished? summary-printed? sweep-results sweep-pass-percent
+  job-running? result-ready? report-pending? optimization-status job-context job-kind
 ]
+;; Widget variables: k1 k2 k3 k4 k5 k6 initial-A initial-B initial-C
+;; motif-mode ligand-level sweep-parameter search-range-factor
+;; Do not duplicate widget variables in globals.
 
 
-;; ============================================================
-;; DECLARED BY INTERFACE WIDGETS, NOT BY GLOBALS:
-;;
-;; k1 k2 k3 k4 k5 k6
-;; initial-A initial-B initial-C
-;; motif-mode
-;; ligand-level
-;; ============================================================
-
-
-;; ============================================================
-;; PRESETS
-;; ============================================================
+to-report default-constants [mode]
+  if mode = "NFBLB" [report (list 1 1 0.000001 0.000001 0.05 0.05)]
+  report (list 1 1 0.000001 10000 0.05 0.05)
+end
 
 to nfblb-defaults
+  if busy? = true [stop]
   set motif-mode "NFBLB"
-
-  set k1 1
-  set k2 1
-  set k3 0.05
-  set k4 0.025
-  set k5 10
-  set k6 10
-
-  set initial-A 0.5
-  set initial-B 0.5
-  set initial-C 0.5
-
-  set ligand-level 1.2
+  set k1 1 set k2 1 set k3 0.05 set k4 0.025 set k5 10 set k6 10
+  common-defaults
 end
-
 
 to ifflp-defaults
+  if busy? = true [stop]
   set motif-mode "IFFLP"
-
-  set k1 1
-  set k2 1
-  set k3 0.05
-  set k4 500
-  set k5 10
-  set k6 10
-
-  set initial-A 0.5
-  set initial-B 0.5
-  set initial-C 0.5
-
-  set ligand-level 1.2
+  set k1 1 set k2 1 set k3 0.05 set k4 500 set k5 10 set k6 10
+  common-defaults
 end
 
-
-;; ============================================================
-;; PARAMETER SNAPSHOT FROM CURRENT WIDGETS
-;; ============================================================
+to common-defaults
+  set hidden-constants default-constants motif-mode
+  set constants-mode motif-mode
+  set initial-A 0.5 set initial-B 0.5 set initial-C 0.5
+  set ligand-level 1.2 set search-range-factor 2 set sweep-parameter "k1"
+  set ready? false
+end
 
 to-report current-parameters
-  if motif-mode = "NFBLB" [
-    report
-      (list
-        k1 k2 k3 k4 k5 k6
-        1 1 0.000001 0.000001 0.05 0.05)
+  let tail default-constants motif-mode
+  if (constants-mode = motif-mode) and (is-list? hidden-constants) [
+    if length hidden-constants = 6 [set tail hidden-constants]
   ]
-
-  report
-    (list
-      k1 k2 k3 k4 k5 k6
-      1 1 0.000001 10000 0.05 0.05)
+  report sentence (list k1 k2 k3 k4 k5 k6) tail
 end
 
-
 to-report valid-settings?
-  if not member? motif-mode ["NFBLB" "IFFLP"] [
-    user-message "Choose NFBLB or IFFLP."
-    report false
-  ]
-
-  if min (list k1 k2 k3 k4 k5 k6) <= 0 [
-    user-message "All k values must be positive."
-    report false
-  ]
-
-  let initial-values
-    (list initial-A initial-B initial-C)
-
-  if
-    (min initial-values < 0) or
-    (max initial-values > 1)
-  [
-    user-message "Initial activities must be between 0 and 1."
-    report false
-  ]
-
+  if not member? motif-mode ["NFBLB" "IFFLP"] [user-message "Choose a motif." report false]
+  if min current-parameters <= 0 [user-message "All 12 parameters must be positive." report false]
+  let initial-values (list initial-A initial-B initial-C)
+  if (min initial-values < 0) or (max initial-values > 1) [user-message "Initial activities must lie in [0,1]." report false]
   report true
 end
 
-
-;; ============================================================
-;; SETUP / RESET
-;; ============================================================
-
 to setup
+  if busy? = true [stop]
+  if not valid-settings? [stop]
+  let captured-parameters current-parameters
+
   clear-all
-  set ready? false
-
-  ;; EDIT THESE TWO PATHS.
-  set python-path
-    "D:/programmes/Anaconda/python.exe"
-
-  set backend-file
-    "C:/Users/prest/OneDrive/Desktop/adaptation_backend.py"
-
-  if not valid-settings? [
-    stop
-  ]
-
-  if not file-exists? backend-file [
-    user-message "Correct backend-file in setup."
-    stop
-  ]
-
-  set active-mode motif-mode
-
-  py:setup python-path
-
-  py:set "backend_path" backend-file
-
-  py:run
-    "exec(compile(open(backend_path, encoding='utf-8').read(), backend_path, 'exec'))"
-
-  py:set "nl_mode" active-mode
-  py:set "nl_parameters" current-parameters
-
-  py:set "nl_initial"
-    (list initial-A initial-B initial-C)
-
-  py:run "initialize(nl_mode,nl_parameters,nl_initial)"
-
-  read-state
-
-  set sweep-results []
-  set sweep-pass-percent 0
-
-  draw-view
-
-  reset-ticks
-  initialize-plots
-  update-display
-
-  clear-output
-
-  output-print (word "Live model: " active-mode)
-
-  output-print
-    (word "Baseline C: " (precision baseline-C 6))
-
-  output-print
-    (word "Baseline settled? " baseline-settled?)
-
-  output-print
-    "Select a ligand level, then click Apply stimulus."
-
-  output-print
-    "Input stays at its applied value until changed again."
-
-  output-print
-    "Run batch reads the CURRENT parameter widgets."
-
-  if not baseline-settled? [
-    output-print
-      "WARNING: baseline is unsettled. This affects adaptation validity."
-  ]
-
-  set ready? true
+  set hidden-constants sublist captured-parameters 6 12 set constants-mode motif-mode
+  set busy? true set ready? false
+  set job-running? false set result-ready? false set report-pending? false
+  set optimization-status "Idle: apply a stimulus" set job-context [] set job-kind ""
+  set sweep-results [] set sweep-pass-percent 0
+  ;; EDIT THESE TWO PATHS IF NECESSARY.
+  set python-path "D:/programmes/Anaconda/python.exe"
+  set backend-file "C:/Users/prest/OneDrive/Desktop/adaptation_backend.py"
+  carefully [
+    if not file-exists? backend-file [error "Backend file not found; edit backend-file in setup."]
+    py:setup python-path
+    py:set "backend_path" backend-file
+    py:run "exec(compile(open(backend_path, encoding='utf-8').read(), backend_path, 'exec'))"
+    py:set "nl_mode" motif-mode py:set "nl_parameters" current-parameters
+    py:set "nl_initial" (list initial-A initial-B initial-C)
+    py:run "initialize(nl_mode,nl_parameters,nl_initial)"
+    set active-mode motif-mode set live-parameters current-parameters set summary-printed? false
+    read-state draw-view reset-ticks initialize-plots update-display clear-output
+    output-print "Ready. Live k edits preserve state, time and plots."
+    output-print "Optimize searches ALL 12 parameters, including Michaelis constants."
+    output-print "Commands: sensitivity-analysis, save-data, save-results, inspect-data, load-parameters."
+    output-print (word "Settled now? " settled-now?)
+    set ready? true
+  ] [user-message (word "SETUP ERROR: " error-message)]
+  set busy? false
 end
-
 
 to reset-simulation
   setup
 end
 
-
-;; ============================================================
-;; LIVE SIMULATION
-;; ============================================================
-
-to go
-  if not ready? [
-    user-message "Click Setup / Reset first."
-    stop
-  ]
-
-  if event-finished? [
-    stop
-  ]
-
-  py:run "advance()"
-
-  read-state
-  update-display
-
-  tick
-
-  if event-finished? [
-    print-summary
-    stop
-  ]
-end
-
-
-to apply-stimulus
-  if not ready? [
-    user-message "Click Setup / Reset first."
-    stop
-  ]
-
-  if abs (ligand-level - current-input) < 0.000000001 [
-    user-message "Choose a different ligand level."
-    stop
-  ]
-
-  py:set "nl_ligand" ligand-level
-  py:run "apply_stimulus(nl_ligand)"
-
-  read-state
-  update-display
-
-  output-print ""
-
-  output-print
-    (word
-      "Stimulus at time "
-      (precision simulation-time 2)
-      ": input = "
-      current-input)
-
-  output-print
-    "Metrics now refer to this latest stimulus event."
-
-  if not baseline-settled? [
-    output-print
-      "WARNING: stimulus occurred before equilibration."
-  ]
-
-  display
-end
-
-
-to read-state
-  let result py:runresult "export_state()"
-
-  set simulation-time item 0 result
-
-  set activity-A item 1 result
-  set activity-B item 2 result
-  set activity-C item 3 result
-
-  set current-input item 4 result
-
-  set baseline-C item 5 result
-  set baseline-settled? item 6 result
-
-  set recovery-error item 7 result
-  set peak-response item 8 result
-
-  set sensitivity-score item 9 result
-  set precision-score item 10 result
-
-  set recovery-time item 11 result
-  set run-status item 12 result
-  set event-finished? item 13 result
-end
-
-
-;; ============================================================
-;; MOTIF TEXT
-;; ============================================================
-
-to-report motif-structure
-  let selected motif-mode
-
-  if ready? = true [
-    set selected active-mode
-  ]
-
-  if selected = "NFBLB" [
-    report "I -> A; A -> C; C -> B; B inhibits C"
-  ]
-
-  if selected = "IFFLP" [
-    report "I -> A; A -> B; A -> C; B inhibits C"
-  ]
-
-  report "Choose a motif"
-end
-
-
-;; ============================================================
-;; VIEW
-;; ============================================================
-
-to draw-view
-  resize-world -8 8 -6 6
-  set-patch-size 27
-
-  ask patches [
-    set pcolor white
-  ]
-
-  make-node "I" -6 1
-  make-node "A" -2 1
-  make-node "B" 2 4
-  make-node "C" 5 1
-
-  connect-nodes "I" "A" "+"
-  connect-nodes "A" "C" "+"
-
-  ifelse active-mode = "NFBLB" [
-    connect-nodes "C" "B" "+"
-  ] [
-    connect-nodes "A" "B" "+"
-  ]
-
-  connect-nodes "B" "C" "INHIBITS"
-
-  create-cell-markers 1 [
-    setxy -5 -3
-    set shape "circle"
-    set size 2
-    set label-color black
-  ]
-
-  ask patch 1 -3 [
-    set plabel "Marker: output relative to baseline"
-    set plabel-color black
-  ]
-
-  ask patch 1 -4 [
-    set plabel "Green: in band | red: above | blue: below"
-    set plabel-color black
-  ]
-
-  ask patch 1 -5 [
-    set plabel "Use plots and scores to assess adaptation."
-    set plabel-color black
-  ]
-end
-
-
-to make-node [title xpos ypos]
-  create-motif-nodes 1 [
-    set node-name title
-    setxy xpos ypos
-    set shape "circle"
-    set size 1.6
-    set label-color black
-  ]
-end
-
-
-to connect-nodes [source-name target-name edge-label]
-  let source-node
-    one-of motif-nodes with [node-name = source-name]
-
-  let target-node
-    one-of motif-nodes with [node-name = target-name]
-
-  ask source-node [
-    create-regulation-to target-node [
-      set label edge-label
-      set label-color black
-      set thickness 0.15
-
-      ifelse edge-label = "INHIBITS" [
-        set color red
-      ] [
-        set color gray
-      ]
+to sync-live-parameters
+  if current-parameters != live-parameters [
+    py:set "nl_parameters" current-parameters
+    let changed? py:runresult "update_parameters(nl_parameters)"
+    set live-parameters current-parameters
+    if changed? [
+      set result-ready? false set report-pending? false set summary-printed? true
+      set optimization-status "Rates changed: settle, then stimulate"
+      output-print (word "Rates changed at t=" precision simulation-time 2 "; state/time/plots preserved.")
     ]
   ]
 end
 
-
-;; ============================================================
-;; PLOTS
-;; ============================================================
-
-to initialize-plots
-  set-current-plot "Input stimulus"
-  set-plot-x-range 0 320
-  set-plot-y-range 0 2
-
-  create-temporary-plot-pen "Applied input"
-  set-plot-pen-color black
-
-  set-current-plot "Output and recovery band"
-  set-plot-x-range 0 320
-  set-plot-y-range 0 1
-
-  foreach ["C" "Baseline" "Upper 2%" "Lower 2%"] [
-    pen-name ->
-    create-temporary-plot-pen pen-name
+to go
+  if (ready? = true) and (busy? != true) [
+    if motif-mode != active-mode [user-message "Topology changes require Setup." stop]
+    if min current-parameters <= 0 [user-message "Use positive parameter values." stop]
+    carefully [
+      sync-live-parameters
+      py:run "advance()"
+      read-state update-display tick
+      if (result-ready? = true) and (job-context != current-job-context) [
+        set result-ready? false set optimization-status "Outdated result: Optimize again"
+      ]
+      if event-finished? and not summary-printed? [
+        print-summary set summary-printed? true set report-pending? event-valid?
+      ]
+    ] [
+      set ready? false set optimization-status (word "Simulation halted: " error-message)
+      output-print optimization-status
+      output-print (word "Last valid t=" simulation-time " | A B C=" (list activity-A activity-B activity-C))
+      output-print (word "Parameters=" current-parameters " | input=" current-input)
+      draw-status stop
+    ]
+    ;; Worker failures do not halt the live trajectory.
+    carefully [
+      if (ticks mod 10 = 0) and (job-running? = true) [check-job]
+      if (report-pending? = true) and (job-running? != true) and (result-ready? != true) [
+        set report-pending? false start-job "report"
+      ]
+    ] [
+      set job-running? false set report-pending? false
+      set optimization-status "Background error: see Output (live model continues)"
+      output-print error-message
+    ]
+    draw-status
   ]
-
-  set-current-plot-pen "C"
-  set-plot-pen-color red
-
-  set-current-plot-pen "Baseline"
-  set-plot-pen-color black
-
-  set-current-plot-pen "Upper 2%"
-  set-plot-pen-color gray
-
-  set-current-plot-pen "Lower 2%"
-  set-plot-pen-color gray
-
-  set-current-plot "Internal activities"
-  set-plot-x-range 0 320
-  set-plot-y-range 0 1
-
-  foreach ["A" "B" "C"] [
-    pen-name ->
-    create-temporary-plot-pen pen-name
-  ]
-
-  set-current-plot-pen "A"
-  set-plot-pen-color blue
-
-  set-current-plot-pen "B"
-  set-plot-pen-color green
-
-  set-current-plot-pen "C"
-  set-plot-pen-color red
-
-  set-current-plot "Batch results"
-  set-plot-x-range 0 44
-  set-plot-y-range 0 5
-
-  create-temporary-plot-pen "Recovery error"
-  set-plot-pen-mode 1
-
-  create-temporary-plot-pen "2% error limit"
-  set-plot-pen-color black
 end
 
+to apply-stimulus
+  if busy? = true [stop]
+  if ready? != true [user-message "Click Setup first." stop]
+  if motif-mode != active-mode [user-message "Topology changes require Setup." stop]
+  if not valid-settings? [stop]
+  carefully [
+    sync-live-parameters py:set "nl_ligand" ligand-level py:run "apply_stimulus(nl_ligand)"
+    set summary-printed? false set result-ready? false set report-pending? false
+    read-state update-display
+    set optimization-status "New event: blue reference captured"
+    output-print (word "Stimulus at t=" precision simulation-time 2 " | input=" current-input)
+    if not baseline-settled? [output-print "Unsettled starting state: exploratory, not a clean adaptation test."]
+    draw-status
+  ] [user-message error-message]
+end
+
+to read-state
+  let r py:runresult "export_state()"
+  set simulation-time item 0 r set activity-A item 1 r set activity-B item 2 r
+  set activity-C item 3 r set current-input item 4 r set baseline-C item 5 r
+  set baseline-settled? item 6 r set recovery-error item 7 r set peak-response item 8 r
+  set sensitivity-score item 9 r set precision-score item 10 r set recovery-time item 11 r
+  set run-status item 12 r set event-finished? item 13 r set settled-now? item 14 r set event-valid? item 15 r
+end
+
+to-report motif-structure
+  let selected motif-mode
+  if ready? = true [set selected active-mode]
+  if selected = "NFBLB" [report "I -> A; A -> C; C -> B; B inhibits C"]
+  if selected = "IFFLP" [report "I -> A; A -> B; A -> C; B inhibits C"]
+  report "Choose a motif"
+end
+
+to draw-view
+  resize-world -8 8 -6 6 set-patch-size 27 ask patches [set pcolor white]
+  make-node "I" -6 1 make-node "A" -2 1 make-node "B" 2 4 make-node "C" 5 1
+  connect-nodes "I" "A" "+" connect-nodes "A" "C" "+"
+  ifelse active-mode = "NFBLB" [connect-nodes "C" "B" "+"] [connect-nodes "A" "B" "+"]
+  connect-nodes "B" "C" "INHIBITS"
+  create-cell-markers 1 [setxy -5 -3 set shape "circle" set size 2 set label-color black]
+  ask patch 1 -3 [set plabel "Red: C | blue: pre-stimulus baseline" set plabel-color black]
+  ask patch 1 -4 [set plabel "Green: in band | red: above | blue: below | gray: invalid test" set plabel-color black]
+end
+
+to make-node [title xpos ypos]
+  create-motif-nodes 1 [set node-name title setxy xpos ypos set shape "circle" set size 1.6 set label-color black]
+end
+
+to connect-nodes [source-name target-name edge-label]
+  let source-node one-of motif-nodes with [node-name = source-name]
+  let target-node one-of motif-nodes with [node-name = target-name]
+  ask source-node [create-regulation-to target-node [
+    set label edge-label set label-color black set thickness 0.15
+    ifelse edge-label = "INHIBITS" [set color red] [set color gray]
+  ]]
+end
+
+to initialize-plots
+  set-current-plot "Input stimulus" set-plot-x-range 0 1000 set-plot-y-range 0 2
+  create-temporary-plot-pen "Applied input" set-plot-pen-color black
+  set-current-plot "Output and recovery band" set-plot-x-range 0 1000 set-plot-y-range 0 1
+  foreach ["C" "Baseline" "Upper 2%" "Lower 2%"] [p -> create-temporary-plot-pen p]
+  set-current-plot-pen "C" set-plot-pen-color red
+  set-current-plot-pen "Baseline" set-plot-pen-color blue
+  set-current-plot-pen "Upper 2%" set-plot-pen-color gray
+  set-current-plot-pen "Lower 2%" set-plot-pen-color gray
+  set-current-plot "Internal activities" set-plot-x-range 0 1000 set-plot-y-range 0 1
+  foreach ["A" "B" "C"] [p -> create-temporary-plot-pen p]
+  set-current-plot-pen "A" set-plot-pen-color blue
+  set-current-plot-pen "B" set-plot-pen-color green
+  set-current-plot-pen "C" set-plot-pen-color red
+  set-current-plot "Batch responses" set-plot-x-range 0 300 set-plot-y-range 0 2
+end
 
 to update-display
   ask motif-nodes [
@@ -492,285 +229,293 @@ to update-display
     if node-name = "A" [set activity activity-A]
     if node-name = "B" [set activity activity-B]
     if node-name = "C" [set activity activity-C]
-
-    set label
-      (word node-name " = " (precision activity 3))
-
-    ifelse node-name = "I" [
-      set color gray
-    ] [
-      set color scale-color blue activity 0 1
-    ]
+    set label (word node-name " = " precision activity 3)
+    ifelse node-name = "I" [set color gray] [set color scale-color blue activity 0 1]
   ]
-
   ask cell-markers [
-    ifelse not baseline-settled? [
-      set color gray
-      set label "Unsettled baseline"
-    ] [
-      let deviation
-        (activity-C - baseline-C) / baseline-C
-
-      ifelse abs deviation <= 0.02 [
-        set color green
-        set label "Within recovery band"
-      ] [
-        ifelse deviation > 0 [
-          set color red
-          set label "Above baseline"
-        ] [
-          set color blue
-          set label "Below baseline"
-        ]
+    ifelse (not baseline-settled?) or (not event-valid?) [set color gray set label "Exploratory / interrupted"] [
+      let deviation (activity-C - baseline-C) / baseline-C
+      ifelse abs deviation <= .02 [set color green set label "Within band"] [
+        ifelse deviation > 0 [set color red set label "Above baseline"] [set color blue set label "Below baseline"]
       ]
     ]
   ]
-
-  set-current-plot "Input stimulus"
-  set-current-plot-pen "Applied input"
-  plotxy simulation-time current-input
-
+  set-current-plot "Input stimulus" set-current-plot-pen "Applied input" plotxy simulation-time current-input
   set-current-plot "Output and recovery band"
-
-  set-current-plot-pen "C"
-  plotxy simulation-time activity-C
-
-  set-current-plot-pen "Baseline"
-  plotxy simulation-time baseline-C
-
-  set-current-plot-pen "Upper 2%"
-  plotxy simulation-time (baseline-C * 1.02)
-
-  set-current-plot-pen "Lower 2%"
-  plotxy simulation-time (baseline-C * 0.98)
-
+  set-current-plot-pen "C" plotxy simulation-time activity-C
+  set-current-plot-pen "Baseline" plotxy simulation-time baseline-C
+  set-current-plot-pen "Upper 2%" plotxy simulation-time (baseline-C * 1.02)
+  set-current-plot-pen "Lower 2%" plotxy simulation-time (baseline-C * .98)
   set-current-plot "Internal activities"
-
-  set-current-plot-pen "A"
-  plotxy simulation-time activity-A
-
-  set-current-plot-pen "B"
-  plotxy simulation-time activity-B
-
-  set-current-plot-pen "C"
-  plotxy simulation-time activity-C
+  set-current-plot-pen "A" plotxy simulation-time activity-A
+  set-current-plot-pen "B" plotxy simulation-time activity-B
+  set-current-plot-pen "C" plotxy simulation-time activity-C
 end
-
-
-;; ============================================================
-;; INTERACTIVE RESULTS
-;; ============================================================
 
 to print-summary
-  output-print ""
-  output-print "===== LIVE ADAPTATION RESULTS ====="
-
-  output-print
-    (word "Maximum final-window error: "
-      (precision recovery-error 5) "%")
-
-  output-print
-    (word "Peak output deviation: "
-      (precision peak-response 3) "%")
-
-  output-print
-    (word "Sensitivity S: "
-      (precision sensitivity-score 4))
-
-  output-print
-    (word "Conservative precision P: "
-      (precision precision-score 3))
-
-  output-print
-    (word "Observed recovery time: "
-      (precision recovery-time 2))
-
+  output-print "===== LIVE EVENT: first 300 time units ====="
+  output-print (word "Error=" precision recovery-error 5 "% | peak=" precision peak-response 3 "%")
+  output-print (word "Ligand S=" precision sensitivity-score 4 " | P=" precision precision-score 3
+    " | recovery=" precision recovery-time 2)
   output-print run-status
+  output-print "Robustness is a separate equilibrated-configuration test."
 end
 
+to optimize
+  request-job "optimize"
+end
 
-;; ============================================================
-;; RUN BATCH
-;; Reads current widgets, not the live model's old parameters.
-;; Does not rebuild or change the live simulation.
-;; ============================================================
+to sensitivity-analysis
+  request-job "sensitivity"
+end
 
-to run-batch
-  if not ready? [
-    user-message
-      "Click Setup / Reset once to connect Python. Then run the batch."
-    stop
-  ]
+to robustness-report
+  request-job "report"
+end
 
-  if not valid-settings? [
-    stop
-  ]
-
-  ;; Snapshot the CURRENT interface values.
-  let batch-mode motif-mode
-  let batch-parameters current-parameters
-
-  let batch-initial
-    (list initial-A initial-B initial-C)
-
-  py:set "batch_mode" batch-mode
-  py:set "batch_parameters" batch-parameters
-  py:set "batch_initial" batch-initial
-
-  output-print ""
-  output-print "===== BATCH RESULTS ====="
-
-  output-print
-    (word "Batch motif: " batch-mode)
-
-  output-print
-    (word
-      "Current k values: "
-      (list k1 k2 k3 k4 k5 k6))
-
-  output-print
-    "Running 2 reference tests and 40 perturbed tests..."
-
-  output-print
-    "The interface may pause while Python calculates."
-
-  display
-
-  let result
-    py:runresult
-      "run_batch(batch_mode,batch_parameters,batch_initial)"
-
-  set sweep-results item 0 result
-  set sweep-pass-percent item 1 result
-
-  set-current-plot "Batch results"
-  clear-plot
-
-  create-temporary-plot-pen "Recovery error"
-  set-plot-pen-mode 1
-
-  create-temporary-plot-pen "2% error limit"
-  set-plot-pen-color black
-
-  set-plot-x-range 0 44
-
-  let largest-error
-    max (map [row -> item 2 row] sweep-results)
-
-  set-plot-y-range
-    0
-    (max (list 5 (largest-error * 1.1)))
-
-  set-current-plot-pen "2% error limit"
-  plotxy 0 2
-  plotxy 44 2
-
-  set-current-plot-pen "Recovery error"
-
-  let number 0
-
-  foreach sweep-results [
-    row ->
-
-    set number number + 1
-
-    ifelse item 8 row [
-      set-plot-pen-color green
-    ] [
-      set-plot-pen-color red
+to request-job [kind]
+  if busy? = true [stop]
+  if ready? != true [user-message "Click Setup first." stop]
+  if motif-mode != active-mode [user-message "Topology changes require Setup." stop]
+  if not valid-settings? [stop]
+  carefully [
+    sync-live-parameters
+    if (job-running? = true) and ((job-kind = "report") or (job-context != current-job-context)) [
+      py:run "stop_job()" set job-running? false set report-pending? false
     ]
-
-    plotxy number (item 2 row)
-
-    output-print
-      (word
-        number ". " (item 0 row)
-        " | I=" (item 1 row)
-        " | error=" (precision (item 2 row) 3) "%"
-        " | S=" (precision (item 4 row) 3)
-        " | " (item 10 row))
-  ]
-
-  output-print ""
-
-  output-print
-    (word
-      "Reference tests passed: "
-      (item 4 result)
-      "/2")
-
-  output-print
-    (word
-      "Perturbed tests passed: "
-      (item 2 result)
-      "/"
-      (item 3 result)
-      " = "
-      (precision sweep-pass-percent 1)
-      "%")
-
-  output-print
-    "Parameters: 20 independent draws; all 12 kinetic parameters multiplied by factors from 0.8 to 1.25."
-
-  output-print
-    "Inputs per draw: 1 -> 1.2 and 1 -> 1.5."
-
-  output-print
-    "Green bars passed ALL criteria. Red bars failed one or more."
-
-  output-print
-    "The live simulation was not changed."
-
-  output-print
-    "CSV export: type export-robustness in the Command Center."
+    if job-running? = true [
+      check-job
+      if job-running? = true [user-message (word "Background: " optimization-status) stop]
+    ]
+    if (kind = "optimize") and (result-ready? = true) and (job-context = current-job-context) [apply-ready stop]
+    set result-ready? false set report-pending? false
+    start-job kind
+  ] [set optimization-status "Background start error: see Output" output-print error-message]
+  draw-status
 end
 
+to-report current-job-context
+  report (list active-mode current-parameters ligand-level search-range-factor current-input)
+end
 
-;; ============================================================
-;; CSV EXPORT
-;; ============================================================
+to start-job [kind]
+  set job-kind kind
+  ifelse kind = "report" [py:set "selected_ligand" current-input] [py:set "selected_ligand" ligand-level]
+  py:set "requested_kind" kind py:set "requested_factor" search-range-factor
+  let info py:runresult "prepare_job(requested_kind,selected_ligand,requested_factor)"
+  let bank []
+  if kind = "optimize" [
+    let index 0
+    repeat (item 0 info) [
+      py:set "candidate_index" index
+      let row py:runresult "get_candidate(candidate_index)"
+      set bank lput (fit-to-controls (item 1 row)) bank
+      set index index + 1
+    ]
+  ]
+  py:set "fitted_bank" bank py:set "configured_backend" backend-file py:set "configured_python" python-path
+  let folder py:runresult "launch_job(configured_backend,configured_python,fitted_bank)"
+  set job-context current-job-context set job-running? true set result-ready? false
+  set optimization-status (word "Background " kind " | " item 1 info " -> " item 2 info)
+  output-print optimization-status output-print (word "Worker files/log: " folder)
+end
+
+to check-job
+  let result py:runresult "poll_job()"
+  let kind item 0 result
+  if kind = "running" [set optimization-status item 1 result stop]
+  if kind = "idle" [set job-running? false stop]
+  set job-running? false
+  if (kind = "stale") or (job-context != current-job-context) [
+    set result-ready? false set optimization-status "Outdated snapshot: not applied" output-print optimization-status stop
+  ]
+  if kind = "error" [set result-ready? false set optimization-status "Background error: see Output" output-print item 1 result stop]
+  if kind = "report" [
+    set optimization-status (word "Qnear=" item 1 result "/" item 3 result " | Qwide=" item 2 result "/" item 3 result)
+    output-print "===== LOCAL ROBUSTNESS REPORT =====" output-print optimization-status
+    output-print (word "Nominal passes? " item 4 result " | " item 5 result " | numerical failures=" item 6 result)
+    output-print "Each trial uses its own pre-stimulus baseline. Finite samples, not paper-global Q."
+  ]
+  if kind = "sensitivity" [
+    set optimization-status "Sensitivity complete: see Output or save-results"
+    print-sensitivity
+  ]
+  if kind = "optimized" [
+    output-print "===== ALL-12-PARAMETER VALIDATION =====" output-print item 8 result
+    if item 7 result > 0 [
+      output-print (word "Nearby: original " item 3 result "/" item 7 result " | candidate " item 4 result "/" item 7 result)
+      output-print (word "Wider: original " item 5 result "/" item 7 result " | candidate " item 6 result "/" item 7 result)
+      output-print (word "Numerical failures: original=" item 9 result " | candidate=" item 10 result)
+    ]
+    set result-ready? item 1 result
+    ifelse result-ready? [set optimization-status "READY TO APPLY: click Optimize again"]
+      [set optimization-status "No validated improvement; existing values kept"]
+    output-print optimization-status print-sensitivity plot-optimization
+  ]
+end
+
+to print-sensitivity
+  output-print "Parameter sensitivity (not ligand S): name | max normalized effect | time | tail effect"
+  let rows py:runresult "sensitivity_summary()"
+  foreach rows [row -> output-print (word item 0 row " | valid? " item 1 row
+    " | max=" item 2 row " | t=" item 3 row " | tail=" item 4 row)]
+end
+
+to apply-ready
+  let previous current-parameters
+  set busy? true
+  carefully [
+    let values py:runresult "ready_values()"
+    if length values != 12 [error "No current 12-parameter suggestion."]
+    if (fit-to-controls values) != values [error "Controls cannot represent the suggested k values."]
+    py:run "apply_result()"
+    set-all-controls values
+    set live-parameters current-parameters
+    set result-ready? false set report-pending? false set summary-printed? true
+    read-state update-display
+    set optimization-status "APPLIED all 12 without reset; settle then stimulate"
+    output-print optimization-status show-parameters
+  ] [set-all-controls previous set result-ready? false set optimization-status "Apply error: see Output" output-print error-message]
+  set busy? false draw-status
+end
+
+to set-all-controls [values]
+  set k1 item 0 values set k2 item 1 values set k3 item 2 values
+  set k4 item 3 values set k5 item 4 values set k6 item 5 values
+  set hidden-constants sublist values 6 12 set constants-mode motif-mode
+end
+
+to-report fit-to-controls [proposed]
+  let previous current-parameters
+  let fitted proposed let issue ""
+  carefully [set-all-controls proposed set fitted current-parameters] [set issue error-message]
+  set-all-controls previous
+  if issue != "" [error issue]
+  if min fitted <= 0 [error "Give k sliders positive minima."]
+  report fitted
+end
+
+to show-parameters
+  (foreach ["k1" "k2" "k3" "k4" "k5" "k6" "KIA" "KFA" "KB" "KFB" "KAC" "KBC"] current-parameters
+    [[name value] -> output-print (word name " = " value)])
+end
+
+to draw-status
+  let shade blue
+  if job-running? = true [set shade cyan]
+  if result-ready? = true [set shade orange]
+  if is-string? optimization-status [
+    if position "APPLIED" optimization-status != false [set shade green]
+    if position "error" optimization-status != false [set shade red]
+    if position "halted" optimization-status != false [set shade red]
+    if position "Outdated" optimization-status != false [set shade gray]
+    ask patch 1 -5 [set plabel optimization-status set plabel-color shade]
+  ]
+end
+
+to plot-optimization
+  let data py:runresult "result_plot()"
+  let times item 0 data let curves item 1 data
+  set-current-plot "Batch responses" clear-plot set-plot-x-range 0 300
+  let lo .9 let hi 1.1
+  foreach curves [row -> set lo min (list lo min (item 1 row)) set hi max (list hi max (item 1 row))]
+  let margin max (list .05 ((hi - lo) * .1))
+  set-plot-y-range (max (list 0 (lo - margin))) (hi + margin)
+  foreach [1 1.02 .98] [v -> create-temporary-plot-pen (word "Reference " v)
+    ifelse v = 1 [set-plot-pen-color blue] [set-plot-pen-color gray] plotxy 0 v plotxy 300 v]
+  let colors (list red orange violet cyan magenta brown) let index 0
+  foreach curves [row -> create-temporary-plot-pen item 0 row
+    set-plot-pen-color item (index mod length colors) colors
+    (foreach times (item 1 row) [[t y] -> plotxy t y]) set index index + 1]
+end
+
+to save-results
+  let destination user-new-file
+  if destination = false [stop]
+  carefully [py:set "save_path" destination py:run "save_results(save_path)"
+    output-print "Saved result JSON and applicable sensitivity/candidate CSV files."] [user-message error-message]
+end
+
+to save-data
+  let destination user-new-file
+  if destination = false [stop]
+  carefully [py:set "save_path" destination py:run "save_live_data(save_path)"
+    output-print "Saved live JSON, event log and companion trajectory CSV (up to 100000 latest points)."] [user-message error-message]
+end
+
+to inspect-data
+  let source user-file
+  if source = false [stop]
+  carefully [py:set "read_path" source
+    let rows py:runresult "read_saved(read_path)"
+    foreach rows [row -> output-print (word item 0 row ": " item 1 row)]] [user-message error-message]
+end
+
+to load-parameters
+  if ready? != true [user-message "Setup first, with the same motif as the saved file." stop]
+  let source user-file
+  if source = false [stop]
+  let previous current-parameters
+  carefully [
+    py:set "read_path" source
+    let saved py:runresult "saved_parameters(read_path)"
+    if item 0 saved != active-mode [error "Saved motif differs. Select that motif and Setup first."]
+    let values item 1 saved
+    let fitted fit-to-controls values
+    if fitted != values [error "Adjust k-slider ranges/increments to represent saved values exactly."]
+    py:set "loaded_values" values py:run "update_parameters(loaded_values)"
+    set-all-controls values set live-parameters current-parameters
+    set result-ready? false set report-pending? false set summary-printed? true
+    read-state update-display
+    set optimization-status "Loaded parameters, not revalidated for current event"
+    output-print optimization-status
+  ] [set-all-controls previous user-message error-message]
+end
+
+to export-optimization
+  save-results
+end
+
+to export-sweep
+  save-results
+end
 
 to export-robustness
-  if not ready? [
-    user-message "Click Setup first."
-    stop
-  ]
+  save-results
+end
 
-  if empty? sweep-results [
-    user-message "Run batch first."
-    stop
-  ]
+to run-batch
+  optimize
+end
 
-  let destination user-new-file
+to find-better-parameters
+  optimize
+end
 
-  if destination = false [stop]
-
-  py:set "csv_path" destination
-  py:run "save_sweep(csv_path)"
-end]]></code>
+to load-recommendation
+  optimize
+end
+]]></code>
   <widgets>
-    <view x="485" wrappingAllowedX="true" y="0" frameRate="30.0" minPycor="-6" height="355" showTickCounter="true" patchSize="27.0" fontSize="10" wrappingAllowedY="true" width="463" tickCounterLabel="ticks" maxPycor="6" updateMode="0" maxPxcor="8" minPxcor="-8"></view>
-    <button x="20" y="10" height="95" disableUntilTicks="false" forever="false" kind="Observer" width="190" display="Setup">Setup</button>
-    <chooser x="225" y="15" height="60" variable="motif-mode" current="0" width="250" display="motif-mode">
+    <view x="529" wrappingAllowedX="true" y="20" frameRate="30.0" minPycor="-6" height="354" showTickCounter="true" patchSize="27.0" fontSize="10" wrappingAllowedY="true" width="462" tickCounterLabel="ticks" maxPycor="6" updateMode="0" maxPxcor="8" minPxcor="-8"></view>
+    <button x="225" y="85" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="110" display="IFFLP defaults">ifflp-defaults</button>
+    <button x="235" y="360" height="60" disableUntilTicks="false" forever="false" kind="Observer" width="235" display="apply-stimulus">apply-stimulus</button>
+    <output x="990" y="360" height="275" fontSize="12" width="445"></output>
+    <slider x="1450" step="0.1" y="300" max="20" width="250" display="k5" height="50" min="0.1" direction="Horizontal" default="14.9" variable="k5"></slider>
+    <slider x="1450" step="0.005" y="230" max="1000" width="250" display="k4" height="50" min="0.005" direction="Horizontal" default="693.695" variable="k4"></slider>
+    <slider x="1455" step="0.1" y="365" max="20" width="250" display="k6" height="50" min="0.1" direction="Horizontal" default="5.9" variable="k6"></slider>
+    <slider x="1450" step="0.05" y="165" max="3" width="250" display="k3" height="50" min="0.01" direction="Horizontal" default="1.2" variable="k3"></slider>
+    <slider x="1450" step="0.05" y="100" max="3" width="250" display="k2" height="50" min="0.1" direction="Horizontal" default="0.35" variable="k2"></slider>
+    <slider x="1450" step="0.005" y="35" max="3" width="250" display="k1" height="50" min="0.1" direction="Horizontal" default="0.3223684210526316" variable="k1"></slider>
+    <slider x="245" step="0.05" y="425" max="2" width="220" display="ligand-level" height="50" min="0.1" direction="Horizontal" default="1.3" variable="ligand-level"></slider>
+    <chooser x="235" y="15" height="60" variable="motif-mode" current="1" width="250" display="motif-mode">
       <choice type="string" value="NFBLB"></choice>
       <choice type="string" value="IFFLP"></choice>
     </chooser>
-    <button x="340" y="85" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="130" display="NFBLB defaults">nfblb-defaults</button>
-    <button x="225" y="85" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="110" display="IFFLP defaults">ifflp-defaults</button>
-    <input x="225" multiline="false" y="160" height="60" variable="initial-A" type="number" width="250">0.5</input>
-    <input x="225" multiline="false" y="225" height="60" variable="initial-B" type="number" width="250">0.5</input>
-    <input x="225" multiline="false" y="290" height="60" variable="initial-C" type="number" width="250">0.5</input>
-    <button x="25" y="110" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="175" display="reset-simulation">reset-simulation</button>
-    <button x="15" y="175" height="170" disableUntilTicks="false" forever="true" kind="Observer" width="195" display="Start / Stop Simulation">go</button>
-    <slider x="245" step="0.05" y="425" max="2" width="220" display="ligand-level" height="50" min="0.2" direction="Horizontal" default="1.8" variable="ligand-level"></slider>
-    <button x="235" y="360" height="60" disableUntilTicks="false" forever="false" kind="Observer" width="235" display="apply-stimulus">apply-stimulus</button>
-    <slider x="1465" step="0.005" y="30" max="3" width="250" display="k1" height="50" min="0.1" direction="Horizontal" default="0.555" variable="k1"></slider>
-    <slider x="1460" step="0.05" y="90" max="3" width="250" display="k2" height="50" min="0.1" direction="Horizontal" default="0.15" variable="k2"></slider>
-    <slider x="1470" step="0.05" y="150" max="3" width="250" display="k3" height="50" min="0.01" direction="Horizontal" default="0.05" variable="k3"></slider>
-    <slider x="1460" step="0.005" y="220" max="1000" width="250" display="k4" height="50" min="0.005" direction="Horizontal" default="0.025" variable="k4"></slider>
-    <slider x="1460" step="0.1" y="290" max="20" width="250" display="k5" height="50" min="0.1" direction="Horizontal" default="10.0" variable="k5"></slider>
-    <slider x="1460" step="0.1" y="360" max="20" width="250" display="k6" height="50" min="0.1" direction="Horizontal" default="10.0" variable="k6"></slider>
-    <note x="25" y="500" backgroundDark="-5987164" fontSize="12" width="310" markdown="true" height="2535" textColorDark="-1" textColorLight="-16777216" backgroundLight="0"><![CDATA[# Biochemical Adaptation: NFBLB & IFFLP
+    <input x="230" multiline="false" y="280" height="60" variable="initial-C" type="number" width="250">0.5</input>
+    <input x="230" multiline="false" y="215" height="60" variable="initial-B" type="number" width="250">0.5</input>
+    <input x="230" multiline="false" y="150" height="60" variable="initial-A" type="number" width="250">0.5</input>
+    <note x="0" y="595" backgroundDark="-5987164" fontSize="12" width="310" markdown="true" height="2535" textColorDark="-1" textColorLight="-16777216" backgroundLight="0"><![CDATA[# Biochemical Adaptation: NFBLB & IFFLP
 
 ## Goal
 Can the output C respond to a stimulus, then return near its original level while the stimulus remains elevated?
@@ -863,8 +608,28 @@ A higher pass percentage means better robustness over this tested range, not a u
 - Moving the ligand slider does not apply it until Apply stimulus is clicked.
 - For clean comparisons, use one stimulus per run.
 - Setup / Reset clears the previous results.]]></note>
-    <button x="40" y="370" height="70" disableUntilTicks="false" forever="false" kind="Observer" width="140" display="Run batch">run-batch</button>
-    <output x="985" y="360" height="275" fontSize="12" width="445"></output>
+    <button x="350" y="85" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="130" display="NFBLB defaults">nfblb-defaults
+</button>
+    <chooser x="15" y="305" height="60" variable="sweep-parameter" current="2" width="190" display="sweep-parameter">
+      <choice type="string" value="k1"></choice>
+      <choice type="string" value="k2"></choice>
+      <choice type="string" value="k3"></choice>
+      <choice type="string" value="k4"></choice>
+      <choice type="string" value="k5"></choice>
+      <choice type="string" value="k6"></choice>
+    </chooser>
+    <button x="10" y="190" height="90" disableUntilTicks="false" forever="true" kind="Observer" width="190" display="Start / Stop Simulation">go</button>
+    <button x="0" y="15" height="70" disableUntilTicks="false" forever="false" kind="Observer" width="210" display="Setup">Setup</button>
+    <button x="35" y="95" height="35" disableUntilTicks="false" forever="false" kind="Observer" width="160" display="reset-simulation">reset-simulation</button>
+    <plot x="315" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="External input I" y="485" xMin="0.0" height="135" legend="false" xMax="10.0" yMin="0.0" width="160" xAxis="Time" display="Input stimulus">
+      <setup></setup>
+      <update></update>
+    </plot>
+    <plot x="985" autoPlotX="true" yMax="20.0" autoPlotY="true" yAxis="Active fraction" y="20" xMin="0.0" height="335" legend="false" xMax="10.0" yMin="0.0" width="450" xAxis="Time" display="Internal activities">
+      <setup></setup>
+      <update></update>
+    </plot>
+    <slider x="10" step="0.1" y="380" max="10" width="200" display="search-range-factor" height="50" min="1.1" direction="Horizontal" default="7.6" variable="search-range-factor"></slider>
     <plot x="1450" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="Output C" y="440" xMin="0.0" height="175" legend="false" xMax="10.0" yMin="0.0" width="240" xAxis="Time" display="Output and recovery band">
       <setup></setup>
       <update></update>
@@ -873,15 +638,9 @@ A higher pass percentage means better robustness over this tested range, not a u
         <update>plot count turtles</update>
       </pen>
     </plot>
-    <plot x="475" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="External input I" y="355" xMin="0.0" height="280" legend="false" xMax="10.0" yMin="0.0" width="205" xAxis="Time" display="Input stimulus">
-      <setup></setup>
-      <update></update>
-    </plot>
-    <plot x="690" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="Recovery error (" y="355" xMin="0.0" height="275" legend="false" xMax="10.0" yMin="0.0" width="265" xAxis="Test number" display="Batch results">
-      <setup></setup>
-      <update></update>
-    </plot>
-    <plot x="960" autoPlotX="true" yMax="20.0" autoPlotY="true" yAxis="Active fraction" y="30" xMin="0.0" height="325" legend="false" xMax="10.0" yMin="0.0" width="475" xAxis="Time" display="Internal activities">
+    <button x="5" y="445" height="70" disableUntilTicks="false" forever="false" kind="Observer" width="190" display="Optimize / Apply">optimize</button>
+    <monitor x="20" precision="17" y="520" height="60" fontSize="11" width="180">optimization-status</monitor>
+    <plot x="500" autoPlotX="true" yMax="10.0" autoPlotY="true" yAxis="Normalized output C / baseline" y="385" xMin="0.0" height="220" legend="false" xMax="10.0" yMin="0.0" width="480" display="Batch responses">
       <setup></setup>
       <update></update>
     </plot>
